@@ -1,0 +1,349 @@
+---
+title: "Covid Analysis"
+author: "C. Sidey"
+date: "2023-03-04"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This Markdown document will explore international Covid-19 cases and deaths, and their relationships to age demographics and population density in their respective countries. The Covid-19 data comes from the Johns Hopkins University Center for Systems Science and Engineering. The population and demographic data comes from the United Nations Department of Economic and Social Affairs.
+
+### Packages Used
+
+This Markdown document uses the following libraries: readr, tidyr, dplyr, lubridate, and ggplot2
+
+```{r libraries, echo=TRUE}
+library(readr)
+library(tidyr)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+```
+## Importing the Data
+
+As mentioned in the introduction I will use Covid-19 data from JHU. The two data sets being used contain information of the location of the cases and deaths in countries accross the world. This data comes in a running total format by date. To supplement the Covid data, I found a useful csv file produced by the United Nations Department of Economic and Social Affairs. This file contains different measures of population statistics from 1950 to 2100. I will use the UN data set to join population and demographic information to the Covid data set. You can review the web site for the UN data set here: *https://population.un.org/wpp/Download/Standard/CSV/*.
+
+```{r import, echo=TRUE}
+
+global_cases_import <- read_csv(
+  "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv"
+)
+  
+global_deaths_import <- read_csv(
+  "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv"
+)
+
+temp <- tempfile()
+download.file("https://population.un.org/wpp/Download/Files/1_Indicators%20(Standard)/CSV_FILES/WPP2022_Demographic_Indicators_Medium.zip", temp)
+world_demo_import <- read_csv(unz(temp, "WPP2022_Demographic_Indicators_Medium.csv"))
+unlink(temp)
+
+```
+You will note from the code above that before reading the csv file, the zip file from the website needs to be downloaded into a 'temp' object in R. You can then use `read_csv()` to bring in the table. For help with the above code, I reviewed the post on **stackoverflow** here: *https://stackoverflow.com/questions/3053833/using-r-to-download-zipped-data-file-extract-and-import-data*
+
+## Cleanin the Data
+
+First we will clean the JHU Covid data by removing unnecessary columns and pivoting the date columns so that our dates come in one column and the values from those dates come into the next column. We also need to change the date variables to the date type object in R. We will do this for both the 'cases' and 'deaths' tables.
+
+```{r Cleaning JHU, echo=TRUE}
+
+global_cases <- global_cases_import %>% 
+  pivot_longer(
+    cols = -c(`Province/State`:Long)
+    , names_to = 'Date'
+    , values_to = 'Cases'
+  ) %>% 
+  select(
+    -`Province/State`
+    , -Lat
+    , -Long
+  ) %>% 
+  mutate(
+    Date = mdy(Date)
+  )
+
+global_deaths <- global_deaths_import %>% 
+  pivot_longer(
+    cols = -c(`Province/State`:Long)
+    , names_to = 'Date'
+    , values_to = 'Deaths'
+  ) %>% 
+  select(
+    -`Province/State`
+    , -Lat
+    , -Long
+  ) %>% 
+  mutate(
+    Date = mdy(Date)
+  )
+
+
+```
+
+### Grouping the Data
+
+When reviewing the cases and deaths table, we note that some countries show a different granularity in their data i.e. some countries include states or provinces. To make our data cleaner, we will group each country - date combination and sum the values of cases and deaths.
+
+```{r Grouping, echo=TRUE}
+
+global_cases_gp <- global_cases %>% 
+  group_by(
+    `Country/Region`
+    , Date
+  ) %>% 
+  summarize(
+    Cases = sum(Cases)
+  ) %>% 
+  ungroup()
+
+global_deaths_gp <- global_deaths %>% 
+  group_by(
+    `Country/Region`
+    , Date
+  ) %>% 
+  summarize(
+    Deaths = sum(Deaths)
+  ) %>% 
+  ungroup()
+
+```
+## Cleaning the Data (Cont.)
+
+Now we will examine the UN demographic data; by looking at `summary(world_demo_import)` we can get a start on how to clean this table. This table contains lots of useful data, but we will narrow it down for this investigation. We will only include the Country Name, Year, Total Population, Population Density, Median Age, and Life Expectancy at Birth. Additionally, the data set contains years of data from 1950 to projected values in year 2100. Because of this, I will only use data from 2019 as a baseline to measure all countries before the widespread onset of the pandemic. 
+
+We also note some inconsistencies with the country names that we will remedy before joining the frames.
+
+A couple notes: The data set includes multiple measures of life expectancy but I will only be using life expectancy at birth for this analysis; the population field measures population in thousands of people.
+
+```{r Cleanin UN, echo=TRUE}
+
+world_demo <- world_demo_import %>% 
+  transmute(
+    `Country/Region` = Location
+    , `Year` = Time
+    , `Population` = TPopulation1July
+    , PopDensity
+    , MedianAgePop
+    , `LifeEx` = LEx
+    ) %>% 
+  filter(
+    Year == 2019
+  )
+
+```
+
+Our next step will be joining these three data frames together for analysis.
+
+## Joining the Data
+
+To join the tables we will need to have column values match. Because I used data from two different sources, some of the country names may be different. First I will use `inner_join()` and `nrow()` to make sure the number of rows in the joined frame match the number of rows from the constituent frames. If the totals match, we know the country names are the same for the cases and deaths tables.
+
+```{r Joining cases deaths, echo=TRUE}
+
+global_cd <- inner_join(
+  global_cases_gp
+  , global_deaths_gp
+  , by = c("Country/Region", "Date")
+)
+
+nrow(global_cd) == nrow(global_cases_gp)
+nrow(global_cd) == nrow(global_deaths_gp)
+
+```
+
+We can use a `left_join()` to join our cases and deaths frames to the UN population frame, then filter by missing values to find which country names need to be renamed for the join to work on all rows.
+
+
+```{r left_join, echo=TRUE}
+
+country_list_cd <- global_cd %>% 
+  group_by(
+    `Country/Region`
+  ) %>% 
+  summarize(
+    n = n()
+  )
+
+find_diff <- left_join(
+  country_list_cd
+  , world_demo
+  , by = c("Country/Region")
+) %>% filter(
+  is.na(Year)
+)
+
+```
+
+
+Using the results from the *find_diff* data frame we will make changes to *world_demo*. Some of these won't have a match and can be ignored; for example, there is no population data for Antarctica or the cruise ship *Diamond Princess*. To change the names we will hard-code in the country names we want.
+
+
+```{r change names, echo=TRUE}
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Bolivia (Plurinational State of)'] <- 'Bolivia'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Brunei Darussalam'] <- 'Brunei'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Myanmar'] <- 'Burma'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Côte d\'Ivoire'] <- 'Cote d\'Ivoire'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Iran (Islamic Republic of)'] <- 'Iran'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Dem. People\'s Republic of Korea'] <- 'Korea, North'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Republic of Korea'] <- 'Korea, South'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Kosovo (under UNSC res. 1244)'] <- 'Kosovo'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Lao People\'s Democratic Republic'] <- 'Laos'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Republic of Moldova'] <- 'Moldova'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Russian Federation'] <- 'Russia'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Syrian Arab Republic'] <- 'Syria'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'China, Taiwan Province of China'] <- 'Taiwan*'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'United Republic of Tanzania'] <- 'Turkey'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Türkiye'] <- 'Turkey'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'United States of America'] <- 'US'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Venezuela (Bolivarian Republic of)'] <- 'Venezuela'
+world_demo$`Country/Region`[world_demo$`Country/Region` == 'Viet Nam'] <- 'Vietnam'
+
+```
+
+Now that the names match we can join the data frames.
+
+```{r join all, echo=TRUE}
+global_covid <- inner_join(
+  global_cd
+  , world_demo
+  , by = c("Country/Region")
+)
+
+```
+We can ignore the warning given by R because we expect multiple matches for each row. This is because we have running totals for the cases and deaths by date. However, because we will be comparing the the case and death totals to population statistics, we can filter the Date field by the most recent to give us the total cases and deaths over the time period that the data was collected. Let's also calculate Deaths per 100,000 people.
+
+```{r filter date, echo=TRUE}
+
+global_covid <- global_covid %>% 
+  filter(
+    Date == '2023-03-03'
+  ) %>% 
+  mutate(
+    DeathsPer100k = Deaths / Population * 100000
+  )
+
+```
+
+
+
+## Data Visualization
+
+Let's visualize the data to see if we can gain any insights to the variables' relationships.
+
+### Cases Deaths Relationship
+
+Our first plot looks at Cases vs Deaths. We expect this to be fairly linear.
+
+```{r pressure, echo=TRUE}
+ggplot(global_covid, aes(x = Cases, y = Deaths)) +
+  geom_point() +
+  geom_smooth(method = lm, se=FALSE, color = "gold")
+
+```
+
+To quantify this linear relationship, we will model this relationship using `lm()`
+
+```{r cases deaths model, echo=TRUE}
+mod_cd <- lm(Cases ~ Deaths, data = global_covid)
+summary(mod_cd)
+```
+As expected we see a strong linear relationship between Cases and Deaths.
+
+### Deaths and Population Density
+
+Let's now visualize the cases and deaths plotted against a countries population density.
+
+```{r popdensity plot, echo=TRUE}
+ggplot(global_covid, aes(x = PopDensity, y = DeathsPer100k)) +
+  geom_point() +
+  geom_smooth(method = lm, se=FALSE, color = "gold")
+```
+
+Let's zoom in on that plot to get a better idea of what we're looking at.
+
+```{r popdensity plot 2, echo=TRUE}
+ggplot(global_covid, aes(x = PopDensity, y = DeathsPer100k)) +
+  geom_point() +
+  geom_smooth(method = lm, se=FALSE, color = "gold") +
+  xlim(0, 2500) +
+  ylim(0, 4e5)
+```
+
+Again we will examine the linear fit of these variables.
+
+```{r popdensity deaths model, echo=TRUE}
+mod_dd <- lm(PopDensity ~ DeathsPer100k, data = global_covid)
+summary(mod_dd)
+```
+My assumption going into this analysis was that deaths would be positively correlated to population density but this doesn't seem to be the case.
+
+
+### Deaths and Median Age
+
+```{r median age plot, echo=TRUE}
+ggplot(global_covid, aes(x = MedianAgePop, y = DeathsPer100k)) +
+  geom_point() +
+  geom_smooth(method = lm, se=FALSE, color = "gold")
+```
+
+```{r median age deaths model, echo=TRUE}
+mod_md <- lm(MedianAgePop ~ DeathsPer100k, data = global_covid)
+summary(mod_md)
+```
+
+This linear model demonstrates a much stronger linear relationship in relation to a countries median age. This follows an assumption that the older the population of a country, the more likely a Covid case would result in a death.
+
+### Deaths and Life Expecatancy
+
+```{r life expectancy plot, echo=TRUE}
+ggplot(global_covid, aes(x = LifeEx, y = DeathsPer100k)) +
+  geom_point() +
+  geom_smooth(method = lm, se=FALSE, color = "gold")
+```
+
+```{r life expectancy deaths model, echo=TRUE}
+mod_ld <- lm(LifeEx ~ DeathsPer100k, data = global_covid)
+summary(mod_ld)
+```
+
+I find this result a bit counter intuitive. I would expect a country with a higher life expectancy to be generally healthier. The linear relationship is not quite as strong as that in the median age model, however, it still shows a significant correlation. I suppose one explanation for this result is that the higher a country's life expectancy, the higher number of older people there would be in that country. This would mean that median age correlates strongly with life expectancy. Let's check!
+
+### Median Age and Life Expectancy
+
+```{r life expectancy and median age plot, echo=TRUE}
+ggplot(global_covid, aes(x = MedianAgePop, y = LifeEx)) +
+  geom_point() +
+  geom_smooth(method = lm, se=FALSE, color = "gold")
+```
+
+```{r life expectancy median age model, echo=TRUE}
+mod_lm <- lm(LifeEx ~ MedianAgePop, data = global_covid)
+summary(mod_lm)
+```
+
+Bingo! Just as I suspected, there is a very tight linear relationship between the median age of a country and its life expectancy.
+
+## Bias and Errors
+
+The first thing we need to consider is bias in our data sources. I tried to pick reputable organizations to source the data but that's not a perfect solution.
+
+We also need to think about faulty assumptions going into the analysis. For one, I believed that the population density of a country would correlate positively with the number of Covid deaths experienced by that country; meaning that the higher the population density the more deaths we would see. This is not the case, some of the worst death totals come from countries with population density < 250.
+
+Another assumption made is that life expectancy can be a proxy for the health care quality in a country; this may not be the case.
+
+Last, we focused on how deaths related to the other variables included. This used the assumption that deaths would be a metric more reliable than case totals. However, measuring case totals might be a better way to measure the impact of the disease.
+
+## Conclusions
+
+Through this analysis we were able to prove to ourselves the strong linear relationship between cases in deaths. This is no surprise as these variables are completely dependent-- to measure a death from Covid, you need to first measure a case of Covid.
+
+A more interesting result we found is that of a linear relationship between the median age of a country and the number of deaths in that country per 100,000 people. Possible even more interesting is that this correlation was also strong when looking at life expectancy and Deaths per 100,000. 
+
+
+
+
